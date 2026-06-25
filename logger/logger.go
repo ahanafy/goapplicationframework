@@ -1,7 +1,9 @@
 package logger
 
 import (
+	"fmt"
 	"math"
+	"net"
 	"strings"
 	"time"
 
@@ -15,7 +17,9 @@ import (
 
 var Logger *zap.Logger
 
-func InitLogger(isDevelopment bool, level string, samplingInitial int, samplingThereafter int) error {
+var trustedProxyCIDRs []*net.IPNet
+
+func InitLogger(isDevelopment bool, level string, samplingInitial int, samplingThereafter int, trustedProxyCIDRValues []string) error {
 	// Create and configure a Zap logger.
 	var err error
 	var cfg zap.Config
@@ -45,8 +49,63 @@ func InitLogger(isDevelopment bool, level string, samplingInitial int, samplingT
 	cfg.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	cfg.EncoderConfig.EncodeDuration = zapcore.NanosDurationEncoder
 
+	if err = setTrustedProxyCIDRs(trustedProxyCIDRValues); err != nil {
+		return err
+	}
+
 	Logger, err = cfg.Build()
 	return err
+}
+
+func setTrustedProxyCIDRs(cidrValues []string) error {
+	trustedProxyCIDRs = nil
+	for _, cidrValue := range cidrValues {
+		cidrValue = strings.TrimSpace(cidrValue)
+		if cidrValue == "" {
+			continue
+		}
+		_, ipNet, err := net.ParseCIDR(cidrValue)
+		if err != nil {
+			return fmt.Errorf("invalid trusted proxy CIDR %q: %w", cidrValue, err)
+		}
+		trustedProxyCIDRs = append(trustedProxyCIDRs, ipNet)
+	}
+	return nil
+}
+
+func isTrustedProxyIP(ipAddress net.IP) bool {
+	for _, trustedProxyCIDR := range trustedProxyCIDRs {
+		if trustedProxyCIDR.Contains(ipAddress) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseIPAddress(value string) net.IP {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if ipAddress := net.ParseIP(value); ipAddress != nil {
+		return ipAddress
+	}
+	host, _, err := net.SplitHostPort(value)
+	if err != nil {
+		return nil
+	}
+	return net.ParseIP(host)
+}
+
+func parseXForwardedForHeader(xffValue string) []net.IP {
+	parts := strings.Split(xffValue, ",")
+	ipAddresses := make([]net.IP, 0, len(parts))
+	for _, part := range parts {
+		if ipAddress := parseIPAddress(part); ipAddress != nil {
+			ipAddresses = append(ipAddresses, ipAddress)
+		}
+	}
+	return ipAddresses
 }
 
 func SetDetails(fhctx *fasthttp.RequestCtx, level zapcore.Level, msg string, err error, extraFields []zap.Field) {
@@ -61,14 +120,45 @@ func SetDetails(fhctx *fasthttp.RequestCtx, level zapcore.Level, msg string, err
 }
 
 func getRealClientIP(fhctx *fasthttp.RequestCtx) string {
-	remoteAddr := strings.SplitN(fhctx.RemoteAddr().String(), ":", 2)
-	if realIP := fhctx.Request.Header.Peek("X-Real-IP"); len(realIP) > 0 {
-		remoteAddr[0] = utils.B2S(realIP)
-	} else if xff := fhctx.Request.Header.Peek("X-Forwarded-For"); len(xff) > 0 {
-		ipAddress := strings.Split(utils.B2S(xff), ",")
-		remoteAddr[0] = strings.TrimSpace(ipAddress[len(ipAddress)-1])
+	peerIPAddress := parseIPAddress(fhctx.RemoteAddr().String())
+	if peerIPAddress == nil {
+		return fhctx.RemoteAddr().String()
 	}
-	return remoteAddr[0]
+
+	if len(trustedProxyCIDRs) == 0 {
+		if realIP := fhctx.Request.Header.Peek("X-Real-IP"); len(realIP) > 0 {
+			if ipAddress := parseIPAddress(utils.B2S(realIP)); ipAddress != nil {
+				return ipAddress.String()
+			}
+		} else if xff := fhctx.Request.Header.Peek("X-Forwarded-For"); len(xff) > 0 {
+			ipAddresses := parseXForwardedForHeader(utils.B2S(xff))
+			if len(ipAddresses) > 0 {
+				return ipAddresses[len(ipAddresses)-1].String()
+			}
+		}
+		return peerIPAddress.String()
+	}
+
+	if !isTrustedProxyIP(peerIPAddress) {
+		return peerIPAddress.String()
+	}
+
+	var forwardedIPs []net.IP
+	if xff := fhctx.Request.Header.Peek("X-Forwarded-For"); len(xff) > 0 {
+		forwardedIPs = parseXForwardedForHeader(utils.B2S(xff))
+	} else if realIP := fhctx.Request.Header.Peek("X-Real-IP"); len(realIP) > 0 {
+		if ipAddress := parseIPAddress(utils.B2S(realIP)); ipAddress != nil {
+			forwardedIPs = append(forwardedIPs, ipAddress)
+		}
+	}
+
+	for i := len(forwardedIPs) - 1; i >= 0; i-- {
+		if !isTrustedProxyIP(forwardedIPs[i]) {
+			return forwardedIPs[i].String()
+		}
+	}
+
+	return peerIPAddress.String()
 }
 
 func LogRequest(fhctx *fasthttp.RequestCtx) {

@@ -4,7 +4,7 @@ ENV CGO_ENABLED=0 \
 RUN apk add --no-cache git tini-static
 WORKDIR /build
 COPY . .
-RUN go build -o goapplicationframework -ldflags "-X github.com/robstradling/goapplicationframework/config.BuildTimestamp=`date --utc +%Y-%m-%dT%H:%M:%SZ`" /build/.
+RUN go build -o goapplicationframework -ldflags "-X $(go list -m)/config.BuildTimestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" /build/.
 
 FROM gcr.io/distroless/static:nonroot
 USER nonroot:nonroot

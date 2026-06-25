@@ -33,10 +33,11 @@ type config struct {
 	}
 	// TODO: Add other configuration here.
 	Logging struct {
-		IsDevelopment      bool   `mapstructure:"isDevelopment"`
-		Level              string `mapstructure:"level"`
-		SamplingInitial    int    `mapstructure:"samplingInitial"`
-		SamplingThereafter int    `mapstructure:"samplingThereafter"`
+		IsDevelopment      bool     `mapstructure:"isDevelopment"`
+		Level              string   `mapstructure:"level"`
+		SamplingInitial    int      `mapstructure:"samplingInitial"`
+		SamplingThereafter int      `mapstructure:"samplingThereafter"`
+		TrustedProxyCIDRs  []string `mapstructure:"trustedProxyCIDRs"`
 	}
 }
 
@@ -62,7 +63,7 @@ func init() {
 	// Initialize Viper and Logger.
 	if err := initViper(); err != nil {
 		panic(err)
-	} else if err = logger.InitLogger(Config.Logging.IsDevelopment, Config.Logging.Level, Config.Logging.SamplingInitial, Config.Logging.SamplingThereafter); err != nil {
+	} else if err = logger.InitLogger(Config.Logging.IsDevelopment, Config.Logging.Level, Config.Logging.SamplingInitial, Config.Logging.SamplingThereafter, Config.Logging.TrustedProxyCIDRs); err != nil {
 		panic(err)
 	}
 
@@ -126,6 +127,7 @@ func initViper() error {
 	viper.SetDefault("logging.level", "")
 	viper.SetDefault("logging.samplingInitial", math.MaxInt)    // When both of these are set to MaxInt, sampling is disabled.
 	viper.SetDefault("logging.samplingThereafter", math.MaxInt) // See https://pkg.go.dev/go.uber.org/zap/zapcore#NewSamplerWithOptions for more information.
+	viper.SetDefault("logging.trustedProxyCIDRs", []string{})
 
 	// Render results to Config Struct.
 	_ = viper.ReadInConfig() // Ignore errors, because we also support reading config from environment variables.

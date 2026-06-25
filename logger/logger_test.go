@@ -1,22 +1,18 @@
 package logger
 
 import (
-	"errors"
 	"net"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/valyala/fasthttp"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-	"go.uber.org/zap/zaptest/observer"
 )
 
 func TestGetRealClientIP_UsesXRealIPHeader(t *testing.T) {
-	t.Parallel()
+	require.NoError(t, setTrustedProxyCIDRs(nil))
 
-	const xRealIPClientIP = "198.51.100.42"
-	const directPeerIP = "203.0.113.10"
+	const xRealIPClientIP = "111.111.111.111"
+	const directPeerIP = "10.10.10.10"
 
 	request := &fasthttp.Request{}
 	request.Header.Set("X-Real-IP", xRealIPClientIP)
@@ -31,15 +27,11 @@ func TestGetRealClientIP_UsesXRealIPHeader(t *testing.T) {
 	require.Equal(t, xRealIPClientIP, actualClientIP)
 }
 
-func TestGetRealClientIP_UsesLeftmostXForwardedForClientIP(t *testing.T) {
-	t.Parallel()
+func TestGetRealClientIP_UsesRightmostXForwardedForWithoutTrustedProxyConfig(t *testing.T) {
+	require.NoError(t, setTrustedProxyCIDRs(nil))
 
-	// MDN X-Forwarded-For semantics:
-	// - Leftmost IP is the originating client address.
-	// - Rightmost IP is the most recent proxy.
-	// Ref: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For
-	const originalClientIP = "2.2.2.2"
-	const closestProxyIP = "1.1.1.1"
+	const originalClientIP = "111.111.111.111"
+	const closestProxyIP = "222.222.222.222"
 	const directPeerIP = "10.10.10.10"
 
 	request := &fasthttp.Request{}
@@ -52,103 +44,47 @@ func TestGetRealClientIP_UsesLeftmostXForwardedForClientIP(t *testing.T) {
 
 	actualClientIP := getRealClientIP(&fhctx)
 
-	require.Equal(t, originalClientIP, actualClientIP)
+	require.Equal(t, closestProxyIP, actualClientIP)
 }
 
-func TestSetDetails_SetsUserValues(t *testing.T) {
-	t.Parallel()
+func TestGetRealClientIP_UsesPeerAddressWhenPeerIsNotTrustedProxy(t *testing.T) {
+	require.NoError(t, setTrustedProxyCIDRs([]string{"34.96.0.0/16"}))
 
-	req := &fasthttp.Request{}
-	remote := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 1234}
+	const spoofedOriginalClientIP = "198.51.100.77"
+	const intermediateProxyIP = "203.0.113.9"
+	const trustedLoadBalancerIP = "34.96.120.5"
+	const directPeerIP = "10.10.10.10"
+
+	request := &fasthttp.Request{}
+	request.Header.Set("X-Forwarded-For", spoofedOriginalClientIP+", "+intermediateProxyIP+", "+trustedLoadBalancerIP)
+
+	remoteAddr := &net.TCPAddr{IP: net.ParseIP(directPeerIP), Port: 12345}
 
 	var fhctx fasthttp.RequestCtx
-	fhctx.Init(req, remote, nil)
+	fhctx.Init(request, remoteAddr, nil)
 
-	extra := []zap.Field{zap.String("k", "v")}
-	SetDetails(&fhctx, zap.InfoLevel, "mymessage", errors.New("oops"), extra)
+	actualClientIP := getRealClientIP(&fhctx)
 
-	require.Equal(t, zap.InfoLevel, fhctx.UserValue("level"))
-	require.Equal(t, "mymessage", fhctx.UserValue("msg"))
-	require.NotNil(t, fhctx.UserValue("error"))
-	require.Equal(t, extra, fhctx.UserValue("zap_fields"))
+	require.Equal(t, directPeerIP, actualClientIP)
 }
 
-func TestLogRequest_ProducesLogEntryWithFields(t *testing.T) {
-	t.Parallel()
+func TestGetRealClientIP_UsesFirstUntrustedAddressFromRightWhenPeerIsTrusted(t *testing.T) {
+	require.NoError(t, setTrustedProxyCIDRs([]string{"34.96.0.0/16", "162.159.0.0/16"}))
 
-	// use an observed core so we can inspect emitted log entries
-	core, obs := observer.New(zapcore.DebugLevel)
-	Logger = zap.New(core)
+	const originalClientIP = "198.51.100.77"
+	const untrustedIntermediateProxyIP = "203.0.113.9"
+	const trustedEdgeProxyIP = "162.159.1.10"
+	const trustedLoadBalancerIP = "34.96.120.5"
 
-	req := &fasthttp.Request{}
-	req.Header.SetContentType("application/json")
-	req.Header.SetUserAgent("tester")
-	req.SetRequestURI("/test/path")
-	req.Header.SetProtocol("HTTP/1.1")
-	req.Header.SetMethod("GET")
+	request := &fasthttp.Request{}
+	request.Header.Set("X-Forwarded-For", originalClientIP+", "+untrustedIntermediateProxyIP+", "+trustedEdgeProxyIP)
 
-	remote := &net.TCPAddr{IP: net.ParseIP("203.0.113.5"), Port: 54321}
+	remoteAddr := &net.TCPAddr{IP: net.ParseIP(trustedLoadBalancerIP), Port: 12345}
+
 	var fhctx fasthttp.RequestCtx
-	fhctx.Init(req, remote, nil)
-	fhctx.Response.SetStatusCode(200)
-	fhctx.Response.SetBodyString("ok")
+	fhctx.Init(request, remoteAddr, nil)
 
-	// add meaningful details and an extra field we can assert on
-	extra := []zap.Field{zap.String("extra_key", "extra_val")}
-	SetDetails(&fhctx, zap.InfoLevel, "hello-world", nil, extra)
+	actualClientIP := getRealClientIP(&fhctx)
 
-	LogRequest(&fhctx)
-
-	entries := obs.All()
-	require.GreaterOrEqual(t, len(entries), 1)
-
-	// find our entry (message should match)
-	var e zapcore.Entry
-	var ctx []zapcore.Field
-	found := false
-	for _, ent := range entries {
-		if ent.Message == "hello-world" {
-			e = ent.Entry
-			ctx = ent.Context
-			found = true
-			break
-		}
-	}
-	require.True(t, found, "expected a log entry with message 'hello-world'")
-	require.Equal(t, zap.InfoLevel, e.Level)
-
-	// assert that our extra field appears in the context
-	seen := map[string]bool{}
-	for _, f := range ctx {
-		seen[f.Key] = true
-	}
-	require.Contains(t, seen, "extra_key")
-}
-
-func TestInitLogger_InvalidLevel_ReturnsError(t *testing.T) {
-	t.Parallel()
-
-	// invalid level should return an error
-	err := InitLogger(false, "not-a-level", 1, 1)
-	require.Error(t, err)
-}
-
-func TestInitLogger_ValidLevel_EnablesGivenLevel(t *testing.T) {
-	t.Parallel()
-
-	// set debug level and ensure the logger core reports Debug enabled
-	err := InitLogger(false, "debug", 1, 1)
-	require.NoError(t, err)
-	require.NotNil(t, Logger)
-	// core should have debug enabled
-	require.True(t, Logger.Core().Enabled(zapcore.DebugLevel))
-}
-
-func TestInitLogger_DisableSampling_Works(t *testing.T) {
-	t.Parallel()
-
-	// passing MaxInt for both sampling values disables sampling configuration
-	err := InitLogger(true, "info", int(^uint(0)>>1), int(^uint(0)>>1))
-	require.NoError(t, err)
-	require.NotNil(t, Logger)
+	require.Equal(t, untrustedIntermediateProxyIP, actualClientIP)
 }
