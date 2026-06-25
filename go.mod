@@ -6,6 +6,7 @@ require (
 	github.com/goccy/go-json v0.10.6
 	github.com/prometheus/client_golang v1.23.2
 	github.com/spf13/viper v1.21.0
+	github.com/stretchr/testify v1.11.1
 	github.com/valyala/fasthttp v1.71.0
 	go.uber.org/automaxprocs v1.6.0
 	go.uber.org/zap v1.28.0
@@ -36,4 +37,5 @@ require (
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
