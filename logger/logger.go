@@ -119,10 +119,34 @@ func SetDetails(fhctx *fasthttp.RequestCtx, level zapcore.Level, msg string, err
 	}
 }
 
+// getRealClientIP determines the actual client IP address from the request context.
+//
+// Security and Privacy Concerns (MDN: https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For#security_and_privacy_concerns):
+// Client IP detection is susceptible to IP spoofing if HTTP headers like X-Forwarded-For
+// or X-Real-IP are trusted blindly. A client can easily set these headers to arbitrary values
+// before sending a request.
+//
+// To prevent spoofing, this function behaves as follows:
+//  1. If no trusted proxies are configured (len(trustedProxyCIDRs) == 0), we fallback to
+//     the rightmost IP in X-Forwarded-For or X-Real-IP, but these cannot be fully trusted
+//     against spoofing.
+//  2. If trusted proxies are configured, we first verify if the direct connecting peer
+//     (peerIPAddress) is a trusted proxy. If the peer is NOT trusted, we MUST NOT trust any
+//     forwarding headers (X-Forwarded-For or X-Real-IP) they sent, as they could be spoofed.
+//     Thus, we immediately return the peer IP address.
+//  3. If the peer IS a trusted proxy, we inspect the X-Forwarded-For header list. Since each
+//     trusted proxy appends the caller's IP to the end of the header, we traverse the list
+//     from right to left (from the most recent proxy back towards the client). The first IP
+//     address in this chain that is NOT a trusted proxy is returned as the real client IP.
+//     This ensures we only trust values appended by our known proxy infrastructure.
 func getRealClientIP(fhctx *fasthttp.RequestCtx) string {
-	peerIPAddress := parseIPAddress(fhctx.RemoteAddr().String())
+	remoteAddr := fhctx.RemoteAddr()
+	if remoteAddr == nil {
+		return ""
+	}
+	peerIPAddress := parseIPAddress(remoteAddr.String())
 	if peerIPAddress == nil {
-		return fhctx.RemoteAddr().String()
+		return remoteAddr.String()
 	}
 
 	if len(trustedProxyCIDRs) == 0 {
@@ -160,6 +184,7 @@ func getRealClientIP(fhctx *fasthttp.RequestCtx) string {
 
 	return peerIPAddress.String()
 }
+
 
 func LogRequest(fhctx *fasthttp.RequestCtx) {
 	// Add common logging details.
